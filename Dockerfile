@@ -13,8 +13,16 @@ RUN apt-get update && apt-get install -y \
     vim \
     unzip \
     htop \
-    && rm -rf /var/lib/apt/lists/*
-
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    sudo \
+    # Playwright 依赖的一些基础库，虽然后面会自动装，但先装上保险
+    libasound2 \
+    libgbm1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install
+    
 # 2. 【核心步骤】配置 SSH 安全设置
 # 这几行命令的意思是：
 # - 创建 SSH 运行必须的目录
@@ -27,6 +35,61 @@ RUN mkdir -p /var/run/sshd && \
     sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin prohibit-password/g' /etc/ssh/sshd_config && \
     sed -i 's/PermitRootLogin yes/PermitRootLogin prohibit-password/g' /etc/ssh/sshd_config
 
+# ==============================================================================
+# 3. 安装 Rust (Stable) & Cargo
+# ==============================================================================
+# 设置环境变量，确保 cargo 命令全局可用
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+# 下载并安装 Rust，-y 表示自动确认
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+# ==============================================================================
+# 4. Node.js (NVM + Node LTS + PNPM)
+# ==============================================================================
+# 设置 NVM 目录
+ENV NVM_DIR /root/.nvm
+ENV NODE_VERSION lts/*
+
+# 安装 NVM, Node.js LTS, 并安装 PNPM
+# 注意：我们在同一个 RUN 指令里完成安装和环境设置，以确保生效
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash && \
+    . $NVM_DIR/nvm.sh && \
+    nvm install --lts && \
+    nvm alias default lts/* && \
+    nvm use default && \
+    npm install -g pnpm
+
+# 【关键】将 Node 和 PNPM 添加到系统 PATH
+# 这样 subsequent RUN commands 和 SSH 登录后都能直接用 node/pnpm
+ENV PATH $NVM_DIR/versions/node/v20.10.0/bin:$PATH
+# 注意：上面的 v20.10.0 是写示例，为了动态获取，我们用软链接技巧：
+RUN ln -sf $(ls -d $NVM_DIR/versions/node/* | tail -1)/bin/node /usr/local/bin/node && \
+    ln -sf $(ls -d $NVM_DIR/versions/node/* | tail -1)/bin/npm /usr/local/bin/npm && \
+    ln -sf $(ls -d $NVM_DIR/versions/node/* | tail -1)/bin/pnpm /usr/local/bin/pnpm
+
+# ==============================================================================
+# 4. 安装 Neovim (最新稳定版)
+# ==============================================================================
+# Ubuntu apt 源里的 neovim 通常太老(v0.4)，SpaceVim 需要 v0.8+
+# 这里直接从 GitHub 下载最新的编译版本
+RUN wget https://github.com/neovim/neovim/releases/latest/download/nvim-linux64.tar.gz -O /tmp/nvim.tar.gz && \
+    tar -C /opt -xzf /tmp/nvim.tar.gz && \
+    rm /tmp/nvim.tar.gz && \
+    ln -s /opt/nvim-linux64/bin/nvim /usr/local/bin/nvim && \
+    # 做一个软链接，让你输 vi 或 vim 也能打开 nvim
+    ln -sf /usr/local/bin/nvim /usr/local/bin/vim
+
+# ==============================================================================
+# 5. 安装 SpaceVim
+# ==============================================================================
+# 自动安装 SpaceVim 到 root 用户
+RUN curl -sLf https://spacevim.org/install.sh | bash
+
+
 # 3. 安装 uv
 RUN pip install uv
 
@@ -35,6 +98,22 @@ COPY requirements.txt /tmp/requirements.txt
 RUN uv pip install --system -r /tmp/requirements.txt
 
 WORKDIR /workspace
+
+# ==============================================================================
+# 8. 安装 Cloudflare Tunnel (cloudflared)
+# ==============================================================================
+RUN mkdir -p --mode=0755 /usr/share/keyrings && \
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null && \
+    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared jammy main' | tee /etc/apt/sources.list.d/cloudflared.list && \
+    apt-get update && apt-get install -y cloudflared
+
+# ==============================================================================
+# 9. 准备启动脚本 (Entrypoint)
+# ==============================================================================
+# 我们创建一个启动脚本，用来同时启动 cloudflared 和 sshd
+COPY start_services.sh /root/start_services.sh
+RUN chmod +x /root/start_services.sh
+
 
 # 5. 【重要】启动命令
 # 告诉容器启动时开启 SSH 服务，并且保持运行
