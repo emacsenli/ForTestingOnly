@@ -92,6 +92,54 @@ RUN curl -sLf https://spacevim.org/install.sh | bash
 
 # 3. 安装 uv
 RUN pip install uv
+# --- 创建主虚拟环境 ---
+ENV VENV_PATH=/opt/venv_main
+RUN uv venv $VENV_PATH
+
+# 方便后续命令调用 python
+ENV VENV_PYTHON=$VENV_PATH/bin/python
+ENV VENV_PIP=$VENV_PATH/bin/pip
+
+# --- A. 安装基础大模型工具 & Playwright ---
+# huggingface_hub[cli] 包含了 hf_transfer 加速下载
+# playwright 安装库
+RUN $VENV_PIP install \
+    huggingface_hub[cli] \
+    hf_transfer \
+    playwright \
+    ipython \
+    requests \
+    pandas
+
+# --- B. 安装 Playwright 浏览器 & 系统依赖 ---
+# 这步会下载 Chromium, Firefox 等内核，并安装 Ubuntu 缺少的 .so 库
+# 这一步比较耗时，但必须做
+RUN $VENV_PYTHON -m playwright install --with-deps
+
+# --- C. 安装 IndexTTS2 (假设是 PyPI 包) ---
+# 如果 https://indextts2.org 指向的是一个私有包，需要改成 git clone 安装
+RUN $VENV_PIP install indexTTS2 || echo "indexTTS2 not found on PyPI, skipping..."
+
+# --- D. 安装 BettaFish (从 GitHub) ---
+WORKDIR /workspace
+# Clone 仓库
+RUN git clone https://github.com/666ghj/BettaFish.git /workspace/BettaFish
+# 安装 BettaFish 的依赖 (假设它有 requirements.txt)
+# 如果它没有 requirements.txt，你可能需要手动查看它的文档安装
+RUN if [ -f "/workspace/BettaFish/requirements.txt" ]; then \
+        $VENV_PIP install -r /workspace/BettaFish/requirements.txt; \
+    fi
+# 如果需要安装它自己
+# RUN cd /workspace/BettaFish && $VENV_PIP install .
+
+# ==============================================================================
+# 6. 设置环境变量 & 启动
+# ==============================================================================
+# 开启 HuggingFace 极速下载模式
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# 把虚拟环境的 bin 加入 PATH，这样 SSH 进来直接输入 python 就是虚拟环境的 python
+ENV PATH="$VENV_PATH/bin:$PATH"
 
 # 4. 复制依赖并安装
 COPY requirements.txt /tmp/requirements.txt
